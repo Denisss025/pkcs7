@@ -5,8 +5,6 @@ import (
 	"errors"
 )
 
-var encodeIndent = 0
-
 type asn1Object interface {
 	EncodeTo(writer *bytes.Buffer) error
 }
@@ -16,9 +14,7 @@ type asn1Structured struct {
 	content  []asn1Object
 }
 
-func (s asn1Structured) EncodeTo(out *bytes.Buffer) error {
-	//fmt.Printf("%s--> tag: % X\n", strings.Repeat("| ", encodeIndent), s.tagBytes)
-	encodeIndent++
+func (s *asn1Structured) EncodeTo(out *bytes.Buffer) error {
 	inner := new(bytes.Buffer)
 	for _, obj := range s.content {
 		err := obj.EncodeTo(inner)
@@ -26,7 +22,6 @@ func (s asn1Structured) EncodeTo(out *bytes.Buffer) error {
 			return err
 		}
 	}
-	encodeIndent--
 	out.Write(s.tagBytes)
 	encodeLength(out, inner.Len())
 	out.Write(inner.Bytes())
@@ -47,8 +42,6 @@ func (p asn1Primitive) EncodeTo(out *bytes.Buffer) error {
 	if err = encodeLength(out, p.length); err != nil {
 		return err
 	}
-	//fmt.Printf("%s--> tag: % X length: %d\n", strings.Repeat("| ", encodeIndent), p.tagBytes, p.length)
-	//fmt.Printf("%s--> content length: %d\n", strings.Repeat("| ", encodeIndent), len(p.content))
 	out.Write(p.content)
 
 	return nil
@@ -218,7 +211,7 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 			}
 			subObjects = append(subObjects, subObj)
 		}
-		obj = asn1Structured{
+		obj = &asn1Structured{
 			tagBytes: ber[tagStart:tagEnd],
 			content:  subObjects,
 		}
