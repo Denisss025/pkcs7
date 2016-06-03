@@ -3,6 +3,13 @@ package pkcs7
 import (
 	"bytes"
 	"errors"
+	"sync"
+)
+
+var (
+	bufPool = sync.Pool{New: func() interface{} {
+		return new(bytes.Buffer)
+	}}
 )
 
 type asn1Object interface {
@@ -15,7 +22,10 @@ type asn1Structured struct {
 }
 
 func (s *asn1Structured) EncodeTo(out *bytes.Buffer) error {
-	inner := new(bytes.Buffer)
+	inner := bufPool.Get().(*bytes.Buffer)
+	inner.Reset()
+	defer bufPool.Put(inner)
+
 	for _, obj := range s.content {
 		err := obj.EncodeTo(inner)
 		if err != nil {
@@ -52,7 +62,9 @@ func ber2der(ber []byte) ([]byte, error) {
 		return nil, errors.New("ber2der: input ber is empty")
 	}
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
-	out := new(bytes.Buffer)
+	out := bufPool.Get().(*bytes.Buffer)
+	out.Reset()
+	defer bufPool.Put(out)
 
 	obj, _, err := readObject(ber, 0)
 	if err != nil {
@@ -64,7 +76,10 @@ func ber2der(ber []byte) ([]byte, error) {
 	//	return nil, fmt.Errorf("ber2der: Content longer than expected. Got %d, expected %d", offset, len(ber))
 	//}
 
-	return out.Bytes(), nil
+	retval := make([]byte, out.Len())
+	copy(retval, out.Bytes())
+
+	return retval, nil
 }
 
 // encodes lengths that are longer than 127 into string of bytes
