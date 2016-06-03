@@ -10,6 +10,13 @@ var (
 	bufPool = sync.Pool{New: func() interface{} {
 		return new(bytes.Buffer)
 	}}
+
+	ErrBerIsEmpty           = errors.New("ber2der: input ber is empty")
+	ErrTagLenTooLong        = errors.New("ber2der: BER tag length too long")
+	ErrTagLenNegative       = errors.New("ber2der: BER tag length is negative")
+	ErrTagLenHasLeadingZero = errors.New("ber2der: BER tag length has leading zero")
+	ErrTagLenOverflow       = errors.New("ber2der: BER tag length is more than available data")
+	ErrInvalidFormat        = errors.New("ber2der: Invalid BER format")
 )
 
 type asn1Object interface {
@@ -59,7 +66,7 @@ func (p asn1Primitive) EncodeTo(out *bytes.Buffer) error {
 
 func ber2der(ber []byte) ([]byte, error) {
 	if len(ber) == 0 {
-		return nil, errors.New("ber2der: input ber is empty")
+		return nil, ErrBerIsEmpty
 	}
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
 	out := bufPool.Get().(*bytes.Buffer)
@@ -86,8 +93,9 @@ func ber2der(ber []byte) ([]byte, error) {
 func marshalLongLength(out *bytes.Buffer, i int) (err error) {
 	n := lengthLength(i)
 
-	for ; n > 0; n-- {
-		err = out.WriteByte(byte(i >> uint((n-1)*8)))
+	for n > 0 {
+		n--
+		err = out.WriteByte(byte(i >> uint(n<<3)))
 		if err != nil {
 			return
 		}
@@ -173,13 +181,13 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 	if l > 0x80 {
 		numberOfBytes := (int)(l & 0x7F)
 		if numberOfBytes > 4 { // int is only guaranteed to be 32bit
-			return nil, 0, errors.New("ber2der: BER tag length too long")
+			return nil, 0, ErrTagLenTooLong
 		}
 		if numberOfBytes == 4 && (int)(ber[offset]) > 0x7F {
-			return nil, 0, errors.New("ber2der: BER tag length is negative")
+			return nil, 0, ErrTagLenNegative
 		}
 		if 0x0 == (int)(ber[offset]) {
-			return nil, 0, errors.New("ber2der: BER tag length has leading zero")
+			return nil, 0, ErrTagLenHasLeadingZero
 		}
 		//fmt.Printf("--> (compute length) indicator byte: %x\n", l)
 		//fmt.Printf("--> (compute length) length bytes: % X\n", ber[offset:offset+numberOfBytes])
@@ -191,7 +199,7 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 		// find length by searching content
 		markerIndex := bytes.LastIndex(ber[offset:], []byte{0x0, 0x0})
 		if markerIndex == -1 {
-			return nil, 0, errors.New("ber2der: Invalid BER format")
+			return nil, 0, ErrInvalidFormat
 		}
 		length = markerIndex
 		hack = 2
@@ -203,7 +211,7 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 	//fmt.Printf("--> length        : %d\n", length)
 	contentEnd := offset + length
 	if contentEnd > len(ber) {
-		return nil, 0, errors.New("ber2der: BER tag length is more than available data")
+		return nil, 0, ErrTagLenOverflow
 	}
 	//fmt.Printf("--> content start : %d\n", offset)
 	//fmt.Printf("--> content end   : %d\n", contentEnd)
