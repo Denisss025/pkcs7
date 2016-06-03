@@ -90,6 +90,7 @@ type asn1Primitive struct {
 
 func (p asn1Primitive) EncodeTo(out io.Writer) error {
 	errorHandler := AcquireErrorHandler(out)
+	defer errorHandler.Release()
 	errorHandler.Write(p.tagBytes)
 	if _, err := encodeLength(out, int64(p.length)); err != nil {
 		return err
@@ -99,32 +100,20 @@ func (p asn1Primitive) EncodeTo(out io.Writer) error {
 	return err
 }
 
-func ber2der(ber []byte) ([]byte, error) {
+func ber2der(dst io.Writer, ber []byte) error {
 	if len(ber) == 0 {
-		return nil, ErrBerIsEmpty
+		return ErrBerIsEmpty
 	}
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
-	out := bufPool.Get().(*bytes.Buffer)
-	out.Reset()
-	defer bufPool.Put(out)
-
-	obj, _, err := readObject(ber, 0)
-	if err != nil {
-		return nil, err
+	if obj, _, err := readObject(ber, 0); err != nil {
+		return err
+	} else {
+		return obj.EncodeTo(dst)
 	}
-	err = obj.EncodeTo(out)
-	if err != nil {
-		return nil, err
-	}
-
 	// if offset < len(ber) {
 	//	return nil, fmt.Errorf("ber2der: Content longer than expected. Got %d, expected %d", offset, len(ber))
 	//}
 
-	retval := make([]byte, out.Len())
-	copy(retval, out.Bytes())
-
-	return retval, nil
 }
 
 // encodes the length in DER format

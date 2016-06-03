@@ -11,25 +11,26 @@ func TestBer2Der(t *testing.T) {
 	// indefinite length fixture
 	ber := []byte{0x30, 0x80, 0x02, 0x01, 0x01, 0x00, 0x00}
 	expected := []byte{0x30, 0x03, 0x02, 0x01, 0x01}
-	der, err := ber2der(ber)
-	if err != nil {
+	buf := &bytes.Buffer{}
+	if err := ber2der(buf, ber); err != nil {
 		t.Fatalf("ber2der failed with error: %v", err)
 	}
-	if bytes.Compare(der, expected) != 0 {
-		t.Errorf("ber2der result did not match.\n\tExpected: % X\n\tActual: % X", expected, der)
+	if bytes.Compare(buf.Bytes(), expected) != 0 {
+		t.Errorf("ber2der result did not match.\n\tExpected: % X\n\tActual: % X", expected, buf.Bytes())
 	}
 
-	if der2, err := ber2der(der); err != nil {
+	buf2 := &bytes.Buffer{}
+	if err := ber2der(buf2, buf.Bytes()); err != nil {
 		t.Errorf("ber2der on DER bytes failed with error: %v", err)
 	} else {
-		if !bytes.Equal(der, der2) {
+		if !bytes.Equal(buf.Bytes(), buf2.Bytes()) {
 			t.Error("ber2der is not idempotent")
 		}
 	}
 	var thing struct {
 		Number int
 	}
-	rest, err := asn1.Unmarshal(der, &thing)
+	rest, err := asn1.Unmarshal(buf.Bytes(), &thing)
 	if err != nil {
 		t.Errorf("Cannot parse resulting DER because: %v", err)
 	} else if len(rest) > 0 {
@@ -49,8 +50,10 @@ func TestBer2Der_Negatives(t *testing.T) {
 		{[]byte{0x30, 0x03, 0x01, 0x02}, "length is more than available data"},
 	}
 
+	buf := &bytes.Buffer{}
 	for _, fixture := range fixtures {
-		_, err := ber2der(fixture.Input)
+		buf.Reset()
+		err := ber2der(buf, fixture.Input)
 		if err == nil {
 			t.Errorf("No error thrown. Expected: %s", fixture.ErrorContains)
 		}

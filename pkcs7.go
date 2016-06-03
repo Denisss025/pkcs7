@@ -124,10 +124,14 @@ func Parse(data []byte) (p7 *PKCS7, err error) {
 		return nil, errors.New("pkcs7: input data is empty")
 	}
 	var info contentInfo
-	der, err := ber2der(data)
-	if err != nil {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+	if err = ber2der(buf, data); err != nil {
 		return nil, err
 	}
+	der := make([]byte, buf.Len())
+	copy(der, buf.Bytes())
 	rest, err := asn1.Unmarshal(der, &info)
 	if len(rest) > 0 {
 		err = asn1.SyntaxError{Msg: "trailing data"}
