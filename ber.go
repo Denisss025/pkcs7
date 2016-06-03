@@ -3,12 +3,17 @@ package pkcs7
 import (
 	"bytes"
 	"errors"
+	"io"
 	"sync"
 )
 
 var (
 	bufPool = sync.Pool{New: func() interface{} {
 		return new(bytes.Buffer)
+	}}
+
+	ehwPool = sync.Pool{New: func() interface{} {
+		return new(errHandlerWriter)
 	}}
 
 	ErrBerIsEmpty           = errors.New("ber2der: input ber is empty")
@@ -20,7 +25,7 @@ var (
 )
 
 type asn1Object interface {
-	EncodeTo(writer *bytes.Buffer) error
+	EncodeTo(io.Writer) error
 }
 
 type asn1Structured struct {
@@ -28,7 +33,33 @@ type asn1Structured struct {
 	content  []asn1Object
 }
 
-func (s *asn1Structured) EncodeTo(out *bytes.Buffer) error {
+type errHandlerWriter struct {
+	io.Writer
+	Err error
+}
+
+func (w *errHandlerWriter) Write(p []byte) (n int, err error) {
+	if err = w.Err; err != nil {
+		return
+	}
+	n, err = w.Writer.Write(p)
+	w.Err = err
+	return
+}
+
+func AcquireErrorHandler(w io.Writer) *errHandlerWriter {
+	ehw := ehwPool.Get().(*errHandlerWriter)
+	ehw.Writer = w
+	return ehw
+}
+
+func (w *errHandlerWriter) Release() error {
+	err := w.Err
+	ehwPool.Put(w)
+	return err
+}
+
+func (s *asn1Structured) EncodeTo(out io.Writer) error {
 	inner := bufPool.Get().(*bytes.Buffer)
 	inner.Reset()
 	defer bufPool.Put(inner)
@@ -39,10 +70,16 @@ func (s *asn1Structured) EncodeTo(out *bytes.Buffer) error {
 			return err
 		}
 	}
-	out.Write(s.tagBytes)
-	encodeLength(out, inner.Len())
-	out.Write(inner.Bytes())
-	return nil
+	errorHandler := AcquireErrorHandler(out)
+	defer errorHandler.Release()
+
+	errorHandler.Write(s.tagBytes)
+	if err := encodeLength(errorHandler, inner.Len()); err != nil {
+		return err
+	}
+	errorHandler.Write(inner.Bytes())
+	err := errorHandler.Err
+	return err
 }
 
 type asn1Primitive struct {
@@ -51,17 +88,15 @@ type asn1Primitive struct {
 	content  []byte
 }
 
-func (p asn1Primitive) EncodeTo(out *bytes.Buffer) error {
-	_, err := out.Write(p.tagBytes)
-	if err != nil {
+func (p asn1Primitive) EncodeTo(out io.Writer) error {
+	errorHandler := AcquireErrorHandler(out)
+	errorHandler.Write(p.tagBytes)
+	if err := encodeLength(out, p.length); err != nil {
 		return err
 	}
-	if err = encodeLength(out, p.length); err != nil {
-		return err
-	}
-	out.Write(p.content)
-
-	return nil
+	errorHandler.Write(p.content)
+	err := errorHandler.Err
+	return err
 }
 
 func ber2der(ber []byte) ([]byte, error) {
@@ -77,7 +112,10 @@ func ber2der(ber []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	obj.EncodeTo(out)
+	err = obj.EncodeTo(out)
+	if err != nil {
+		return nil, err
+	}
 
 	// if offset < len(ber) {
 	//	return nil, fmt.Errorf("ber2der: Content longer than expected. Got %d, expected %d", offset, len(ber))
@@ -90,18 +128,12 @@ func ber2der(ber []byte) ([]byte, error) {
 }
 
 // encodes lengths that are longer than 127 into string of bytes
-func marshalLongLength(out *bytes.Buffer, i int) (err error) {
+func marshalLongLength(out *bytes.Buffer, i int) {
 	n := lengthLength(i)
-
 	for n > 0 {
 		n--
-		err = out.WriteByte(byte(i >> uint(n<<3)))
-		if err != nil {
-			return
-		}
+		out.WriteByte(byte(i >> uint(n<<3)))
 	}
-
-	return nil
 }
 
 // computes the byte length of an encoded length value
@@ -128,24 +160,20 @@ func lengthLength(i int) (numBytes int) {
 //  200    | 0x81   | 0xC8
 //  500    | 0x82   | 0x01 0xF4
 //
-func encodeLength(out *bytes.Buffer, length int) (err error) {
+func encodeLength(out io.Writer, length int) error {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
 	if length >= 128 {
 		l := lengthLength(length)
-		err = out.WriteByte(0x80 | byte(l))
-		if err != nil {
-			return
-		}
-		err = marshalLongLength(out, length)
-		if err != nil {
-			return
-		}
+		buf.WriteByte(0x80 | byte(l))
+		marshalLongLength(buf, length)
 	} else {
-		err = out.WriteByte(byte(length))
-		if err != nil {
-			return
-		}
+		buf.WriteByte(byte(length))
 	}
-	return
+	_, err := out.Write(buf.Bytes())
+	return err
 }
 
 func readObject(ber []byte, offset int) (asn1Object, int, error) {
@@ -225,9 +253,9 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 		}
 	} else {
 		var subObjects []asn1Object
+		var err error
+		var subObj asn1Object
 		for offset < contentEnd {
-			var subObj asn1Object
-			var err error
 			subObj, offset, err = readObject(ber[:contentEnd], offset)
 			if err != nil {
 				return nil, 0, err
