@@ -74,7 +74,7 @@ func (s *asn1Structured) EncodeTo(out io.Writer) error {
 	defer errorHandler.Release()
 
 	errorHandler.Write(s.tagBytes)
-	if err := encodeLength(errorHandler, inner.Len()); err != nil {
+	if _, err := encodeLength(errorHandler, int64(inner.Len())); err != nil {
 		return err
 	}
 	errorHandler.Write(inner.Bytes())
@@ -91,7 +91,7 @@ type asn1Primitive struct {
 func (p asn1Primitive) EncodeTo(out io.Writer) error {
 	errorHandler := AcquireErrorHandler(out)
 	errorHandler.Write(p.tagBytes)
-	if err := encodeLength(out, p.length); err != nil {
+	if _, err := encodeLength(out, int64(p.length)); err != nil {
 		return err
 	}
 	errorHandler.Write(p.content)
@@ -127,25 +127,6 @@ func ber2der(ber []byte) ([]byte, error) {
 	return retval, nil
 }
 
-// encodes lengths that are longer than 127 into string of bytes
-func marshalLongLength(out *bytes.Buffer, i int) {
-	n := lengthLength(i)
-	for n > 0 {
-		n--
-		out.WriteByte(byte(i >> uint(n<<3)))
-	}
-}
-
-// computes the byte length of an encoded length value
-func lengthLength(i int) (numBytes int) {
-	numBytes = 1
-	for i > 255 {
-		numBytes++
-		i >>= 8
-	}
-	return
-}
-
 // encodes the length in DER format
 // If the length fits in 7 bits, the value is encoded directly.
 //
@@ -160,20 +141,25 @@ func lengthLength(i int) (numBytes int) {
 //  200    | 0x81   | 0xC8
 //  500    | 0x82   | 0x01 0xF4
 //
-func encodeLength(out io.Writer, length int) error {
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer bufPool.Put(buf)
-
-	if length >= 128 {
-		l := lengthLength(length)
-		buf.WriteByte(0x80 | byte(l))
-		marshalLongLength(buf, length)
-	} else {
-		buf.WriteByte(byte(length))
+func encodeLength(out io.Writer, length int64) (int, error) {
+	var buf64 = [9]byte{0x88,
+		byte(length >> 0x38), byte(length >> 0x30),
+		byte(length >> 0x28), byte(length >> 0x20),
+		byte(length >> 0x18), byte(length >> 0x10),
+		byte(length >> 0x08), byte(length),
 	}
-	_, err := out.Write(buf.Bytes())
-	return err
+
+	buf := buf64[:]
+	for buf[1] == 0 && len(buf) > 2 {
+		buf[1] = buf[0] - 1
+		buf = buf[1:]
+	}
+
+	if len(buf) == 2 && buf[1] < 0x80 {
+		buf = buf[1:]
+	}
+
+	return out.Write(buf)
 }
 
 func readObject(ber []byte, offset int) (asn1Object, int, error) {
