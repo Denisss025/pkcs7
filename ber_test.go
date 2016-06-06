@@ -12,7 +12,8 @@ func TestBer2Der(t *testing.T) {
 	ber := []byte{0x30, 0x80, 0x02, 0x01, 0x01, 0x00, 0x00}
 	expected := []byte{0x30, 0x03, 0x02, 0x01, 0x01}
 	buf := &bytes.Buffer{}
-	if err := ber2der(buf, ber); err != nil {
+
+	if err := ber2der(buf, bytes.NewReader(ber)); err != nil {
 		t.Fatalf("ber2der failed with error: %v", err)
 	}
 	if bytes.Compare(buf.Bytes(), expected) != 0 {
@@ -20,7 +21,7 @@ func TestBer2Der(t *testing.T) {
 	}
 
 	buf2 := &bytes.Buffer{}
-	if err := ber2der(buf2, buf.Bytes()); err != nil {
+	if err := ber2der(buf2, bytes.NewReader(buf.Bytes())); err != nil {
 		t.Errorf("ber2der on DER bytes failed with error: %v", err)
 	} else {
 		if !bytes.Equal(buf.Bytes(), buf2.Bytes()) {
@@ -53,7 +54,7 @@ func TestBer2Der_Negatives(t *testing.T) {
 	buf := &bytes.Buffer{}
 	for _, fixture := range fixtures {
 		buf.Reset()
-		err := ber2der(buf, fixture.Input)
+		err := ber2der(buf, bytes.NewReader(fixture.Input))
 		if err == nil {
 			t.Errorf("No error thrown. Expected: %s", fixture.ErrorContains)
 		}

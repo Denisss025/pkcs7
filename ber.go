@@ -50,6 +50,7 @@ func (w *errHandlerWriter) Write(p []byte) (n int, err error) {
 func AcquireErrorHandler(w io.Writer) *errHandlerWriter {
 	ehw := ehwPool.Get().(*errHandlerWriter)
 	ehw.Writer = w
+	ehw.Err = nil
 	return ehw
 }
 
@@ -84,7 +85,6 @@ func (s *asn1Structured) EncodeTo(out io.Writer) error {
 
 type asn1Primitive struct {
 	tagBytes []byte
-	length   int
 	content  []byte
 }
 
@@ -92,7 +92,7 @@ func (p asn1Primitive) EncodeTo(out io.Writer) error {
 	errorHandler := AcquireErrorHandler(out)
 	defer errorHandler.Release()
 	errorHandler.Write(p.tagBytes)
-	if _, err := encodeLength(out, int64(p.length)); err != nil {
+	if _, err := encodeLength(out, int64(len(p.content))); err != nil {
 		return err
 	}
 	errorHandler.Write(p.content)
@@ -100,12 +100,18 @@ func (p asn1Primitive) EncodeTo(out io.Writer) error {
 	return err
 }
 
-func ber2der(dst io.Writer, ber []byte) error {
-	if len(ber) == 0 {
+func ber2der(dst io.Writer, ber io.Reader) error {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if n, err := io.Copy(buf, ber); err != nil {
+		return err
+	} else if n == 0 {
 		return ErrBerIsEmpty
 	}
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
-	if obj, _, err := readObject(ber, 0); err != nil {
+	if obj, _, err := readObject(buf.Bytes()); err != nil {
 		return err
 	} else {
 		return obj.EncodeTo(dst)
@@ -151,14 +157,14 @@ func encodeLength(out io.Writer, length int64) (int, error) {
 	return out.Write(buf)
 }
 
-func readObject(ber []byte, offset int) (asn1Object, int, error) {
+func readObject(ber []byte) (asn1Object, int, error) {
 	//fmt.Printf("\n====> Starting readObject at offset: %d\n\n", offset)
-	tagStart := offset
+	offset := 0
 	b := ber[offset]
 	offset++
-	tag := b & 0x1F // last 5 bits
-	if tag == 0x1F {
-		tag = 0
+	// Tag == last 5 bits
+	if b&0x1F == 0x1F {
+		tag := byte(0)
 		for ber[offset] >= 0x80 {
 			tag = tag*128 + ber[offset] - 0x80
 			offset++
@@ -186,12 +192,15 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 		if numberOfBytes > 4 { // int is only guaranteed to be 32bit
 			return nil, 0, ErrTagLenTooLong
 		}
-		if numberOfBytes == 4 && (int)(ber[offset]) > 0x7F {
+		length = (int)(ber[offset])
+		if numberOfBytes == 4 && length > 0x7F {
 			return nil, 0, ErrTagLenNegative
 		}
-		if 0x0 == (int)(ber[offset]) {
+		if length == 0x0 {
 			return nil, 0, ErrTagLenHasLeadingZero
 		}
+		offset++
+		numberOfBytes--
 		//fmt.Printf("--> (compute length) indicator byte: %x\n", l)
 		//fmt.Printf("--> (compute length) length bytes: % X\n", ber[offset:offset+numberOfBytes])
 		for i := 0; i < numberOfBytes; i++ {
@@ -222,8 +231,7 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 	var obj asn1Object
 	if kind == 0 {
 		obj = asn1Primitive{
-			tagBytes: ber[tagStart:tagEnd],
-			length:   length,
+			tagBytes: ber[:tagEnd],
 			content:  ber[offset:contentEnd],
 		}
 	} else {
@@ -231,14 +239,15 @@ func readObject(ber []byte, offset int) (asn1Object, int, error) {
 		var err error
 		var subObj asn1Object
 		for offset < contentEnd {
-			subObj, offset, err = readObject(ber[:contentEnd], offset)
+			subObj, length, err = readObject(ber[offset:contentEnd])
 			if err != nil {
 				return nil, 0, err
 			}
+			offset += length
 			subObjects = append(subObjects, subObj)
 		}
 		obj = &asn1Structured{
-			tagBytes: ber[tagStart:tagEnd],
+			tagBytes: ber[:tagEnd],
 			content:  subObjects,
 		}
 	}

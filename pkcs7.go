@@ -127,7 +127,10 @@ func Parse(data []byte) (p7 *PKCS7, err error) {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufPool.Put(buf)
-	if err = ber2der(buf, data); err != nil {
+
+	dataBuf := bytes.NewReader(data)
+
+	if err = ber2der(buf, dataBuf); err != nil {
 		return nil, err
 	}
 	der := make([]byte, buf.Len())
