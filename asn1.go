@@ -336,15 +336,17 @@ func parseUTF8String(data []byte) (ret string, err error) {
 // into a byte slice. It returns the parsed data and the new offset. SET and
 // SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
 // don't distinguish between ordered and unordered objects in this code.
-func parseTagAndLength(data []byte) (ret tagAndLength, offset int, err error) {
+func parseTagAndLength(r io.ByteReader) (ret tagAndLength, err error) {
+	var b byte
+	b, err = r.ReadByte()
 	// parseTagAndLength should not be called without at least a single
 	// byte to read. Thus this check is for robustness:
-	if len(data) == 0 {
+	if err == io.EOF {
 		err = errors.New("asn1: internal error in parseTagAndLength")
 		return
+	} else if err != nil {
+		return
 	}
-	b := data[0]
-	offset++
 	ret.class = int(b >> 6)
 	ret.isCompound = b&0x20 == 0x20
 	ret.tag = int(b & 0x1f)
@@ -352,19 +354,18 @@ func parseTagAndLength(data []byte) (ret tagAndLength, offset int, err error) {
 	// If the bottom five bits are set, then the tag number is actually base 128
 	// encoded afterwards
 	if ret.tag == 0x1f {
-		r := bytes.NewReader(data[offset:])
 		ret.tag, err = parseBase128Int(r)
 		if err != nil {
 			return
 		}
-		offset += int(r.Size()) - r.Len()
 	}
-	if offset >= len(data) {
+	b, err = r.ReadByte()
+	if err == io.EOF {
 		err = asn1.SyntaxError{"truncated tag or length"}
 		return
+	} else if err != nil {
+		return
 	}
-	b = data[offset]
-	offset++
 	if b&0x80 == 0 {
 		// The length is encoded in the bottom 7 bits.
 		ret.length = int(b & 0x7f)
@@ -377,12 +378,13 @@ func parseTagAndLength(data []byte) (ret tagAndLength, offset int, err error) {
 		}
 		ret.length = 0
 		for i := 0; i < numBytes; i++ {
-			if offset >= len(data) {
+			b, err = r.ReadByte()
+			if err == io.EOF {
 				err = asn1.SyntaxError{"truncated tag or length"}
 				return
+			} else if err != nil {
+				return
 			}
-			b = data[offset]
-			offset++
 			if ret.length >= 1<<23 {
 				// We can't shift ret.length up without
 				// overflowing.
@@ -422,9 +424,9 @@ func parseSequenceOf(data []byte, sliceType reflect.Type, elemType reflect.Type)
 	numElements := 0
 	for offset := 0; offset < len(data); {
 		var t tagAndLength
-		n := 0
-		t, n, err = parseTagAndLength(data[offset:])
-		offset += n
+		r := bytes.NewReader(data[offset:])
+		t, err = parseTagAndLength(r)
+		offset += int(r.Size()) - r.Len()
 		if err != nil {
 			return
 		}
@@ -501,9 +503,9 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			err = asn1.SyntaxError{"data truncated"}
 			return
 		}
-		n := 0
-		t, n, err = parseTagAndLength(data[offset:])
-		offset += n
+		r := bytes.NewReader(data[offset:])
+		t, err = parseTagAndLength(r)
+		offset += int(r.Size()) - r.Len()
 		if err != nil {
 			return
 		}
@@ -524,9 +526,9 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			err = asn1.SyntaxError{"data truncated"}
 			return
 		}
-		n := 0
-		t, n, err = parseTagAndLength(data[offset:])
-		offset += n
+		r := bytes.NewReader(data[offset:])
+		t, err = parseTagAndLength(r)
+		offset += int(r.Size()) - r.Len()
 		if err != nil {
 			return
 		}
@@ -581,9 +583,9 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 		err = asn1.SyntaxError{"data truncated"}
 		return
 	}
-	n := 0
-	t, n, err := parseTagAndLength(data[offset:])
-	offset += n
+	r := bytes.NewReader(data[offset:])
+	t, err := parseTagAndLength(r)
+	offset += int(r.Size()) - r.Len()
 	if err != nil {
 		return
 	}
@@ -602,9 +604,9 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 					err = asn1.SyntaxError{"data truncated"}
 					return
 				}
-				n := 0
-				t, n, err = parseTagAndLength(data[offset:])
-				offset += n
+				r := bytes.NewReader(data[offset:])
+				t, err = parseTagAndLength(r)
+				offset += int(r.Size()) - r.Len()
 				if err != nil {
 					return
 				}
