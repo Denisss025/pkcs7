@@ -160,7 +160,7 @@ func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
 	// When value1 = 0 or value1 = 1, then value2 is <= 39. When value1 = 2,
 	// then there are no restrictions on value2.
-	v, _, err := parseBase128Int(r)
+	v, err := parseBase128Int(r)
 	if err == io.EOF {
 		err = asn1.SyntaxError{"zero length OBJECT IDENTIFIER"}
 		return
@@ -176,7 +176,7 @@ func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
 	}
 
 	for err == nil {
-		v, _, err = parseBase128Int(r)
+		v, err = parseBase128Int(r)
 		if err == io.EOF {
 		} else if err != nil {
 			return
@@ -198,7 +198,7 @@ func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
 
 // parseBase128Int parses a base-128 encoded int from the given offset in the
 // given byte slice. It returns the value and the new offset.
-func parseBase128Int(r io.ByteReader) (ret, offset int, err error) {
+func parseBase128Int(r io.ByteReader) (ret int, err error) {
 	var b byte
 	for shifted := 0; err == nil; shifted++ {
 		if shifted == 4 {
@@ -211,7 +211,6 @@ func parseBase128Int(r io.ByteReader) (ret, offset int, err error) {
 			return
 		}
 		ret |= int(b & 0x7f)
-		offset++
 		if b&0x80 == 0 {
 			return
 		}
@@ -353,11 +352,12 @@ func parseTagAndLength(data []byte) (ret tagAndLength, offset int, err error) {
 	// If the bottom five bits are set, then the tag number is actually base 128
 	// encoded afterwards
 	if ret.tag == 0x1f {
-		ret.tag, offset, err = parseBase128Int(bytes.NewReader(data[offset:]))
-		offset++
+		r := bytes.NewReader(data[offset:])
+		ret.tag, err = parseBase128Int(r)
 		if err != nil {
 			return
 		}
+		offset += int(r.Size()) - r.Len()
 	}
 	if offset >= len(data) {
 		err = asn1.SyntaxError{"truncated tag or length"}
