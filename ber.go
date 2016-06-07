@@ -101,17 +101,8 @@ func (p asn1Primitive) EncodeTo(out io.Writer) error {
 }
 
 func ber2der(dst io.Writer, ber io.Reader) error {
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer bufPool.Put(buf)
-
-	if n, err := io.Copy(buf, ber); err != nil {
-		return err
-	} else if n == 0 {
-		return ErrBerIsEmpty
-	}
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
-	if obj, _, err := readObject(buf.Bytes()); err != nil {
+	if obj, _, err := readObject(ber); err != nil {
 		return err
 	} else {
 		return obj.EncodeTo(dst)
@@ -157,9 +148,20 @@ func encodeLength(out io.Writer, length int64) (int, error) {
 	return out.Write(buf)
 }
 
-func readObject(ber []byte) (asn1Object, int, error) {
+func readObject(r io.Reader) (asn1Object, int, error) {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	if n, err := io.Copy(buf, r); err != nil {
+		return nil, 0, err
+	} else if n == 0 {
+		return nil, 0, ErrBerIsEmpty
+	}
 	//fmt.Printf("\n====> Starting readObject at offset: %d\n\n", offset)
 	offset := 0
+	ber := make([]byte, buf.Len())
+	io.ReadFull(buf, ber)
 	b := ber[offset]
 	offset++
 	// Tag == last 5 bits
@@ -239,7 +241,7 @@ func readObject(ber []byte) (asn1Object, int, error) {
 		var err error
 		var subObj asn1Object
 		for offset < contentEnd {
-			subObj, length, err = readObject(ber[offset:contentEnd])
+			subObj, length, err = readObject(bytes.NewReader(ber[offset:contentEnd]))
 			if err != nil {
 				return nil, 0, err
 			}

@@ -135,7 +135,7 @@ func Parse(data []byte) (p7 *PKCS7, err error) {
 	}
 	der := make([]byte, buf.Len())
 	copy(der, buf.Bytes())
-	rest, err := asn1.Unmarshal(der, &info)
+	rest, err := Unmarshal(der, &info)
 	if len(rest) > 0 {
 		err = asn1.SyntaxError{Msg: "trailing data"}
 		return
@@ -156,7 +156,7 @@ func Parse(data []byte) (p7 *PKCS7, err error) {
 
 func parseSignedData(data []byte) (*PKCS7, error) {
 	var sd signedData
-	asn1.Unmarshal(data, &sd)
+	Unmarshal(data, &sd)
 	certs, err := sd.Certificates.Parse()
 	if err != nil {
 		return nil, err
@@ -168,13 +168,13 @@ func parseSignedData(data []byte) (*PKCS7, error) {
 
 	// The Content.Bytes maybe empty on PKI responses.
 	if len(sd.ContentInfo.Content.Bytes) > 0 {
-		if _, err := asn1.Unmarshal(sd.ContentInfo.Content.Bytes, &compound); err != nil {
+		if _, err := Unmarshal(sd.ContentInfo.Content.Bytes, &compound); err != nil {
 			return nil, err
 		}
 	}
 	// Compound octet string
 	if compound.IsCompound {
-		if _, err = asn1.Unmarshal(compound.Bytes, &content); err != nil {
+		if _, err = Unmarshal(compound.Bytes, &content); err != nil {
 			return nil, err
 		}
 	} else {
@@ -195,7 +195,7 @@ func (raw rawCertificates) Parse() ([]*x509.Certificate, error) {
 	}
 
 	var val asn1.RawValue
-	if _, err := asn1.Unmarshal(raw.Raw, &val); err != nil {
+	if _, err := Unmarshal(raw.Raw, &val); err != nil {
 		return nil, err
 	}
 
@@ -204,7 +204,7 @@ func (raw rawCertificates) Parse() ([]*x509.Certificate, error) {
 
 func parseEnvelopedData(data []byte) (*PKCS7, error) {
 	var ed envelopedData
-	if _, err := asn1.Unmarshal(data, &ed); err != nil {
+	if _, err := Unmarshal(data, &ed); err != nil {
 		return nil, err
 	}
 	return &PKCS7{
@@ -273,7 +273,7 @@ func marshalAttributes(attrs []attribute) ([]byte, error) {
 
 	// Remove the leading sequence octets
 	var raw asn1.RawValue
-	asn1.Unmarshal(encodedAttributes, &raw)
+	Unmarshal(encodedAttributes, &raw)
 	return raw.Bytes, nil
 }
 
@@ -357,7 +357,7 @@ func (eci encryptedContentInfo) decrypt(key []byte) ([]byte, error) {
 		cypherbytes := eci.EncryptedContent.Bytes
 		for {
 			var part []byte
-			cypherbytes, _ = asn1.Unmarshal(cypherbytes, &part)
+			cypherbytes, _ = Unmarshal(cypherbytes, &part)
 			buf.Write(part)
 			if cypherbytes == nil {
 				break
@@ -447,7 +447,7 @@ func unpad(data []byte, blocklen int) ([]byte, error) {
 func unmarshalAttribute(attrs []attribute, attributeType asn1.ObjectIdentifier, out interface{}) error {
 	for _, attr := range attrs {
 		if attr.Type.Equal(attributeType) {
-			_, err := asn1.Unmarshal(attr.Value.Bytes, out)
+			_, err := Unmarshal(attr.Value.Bytes, out)
 			return err
 		}
 	}
