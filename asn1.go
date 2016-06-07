@@ -337,15 +337,14 @@ func parseUTF8String(data []byte) (ret string, err error) {
 // into a byte slice. It returns the parsed data and the new offset. SET and
 // SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
 // don't distinguish between ordered and unordered objects in this code.
-func parseTagAndLength(data []byte, initOffset int) (ret tagAndLength, offset int, err error) {
-	offset = initOffset
+func parseTagAndLength(data []byte) (ret tagAndLength, offset int, err error) {
 	// parseTagAndLength should not be called without at least a single
 	// byte to read. Thus this check is for robustness:
-	if offset >= len(data) {
+	if len(data) == 0 {
 		err = errors.New("asn1: internal error in parseTagAndLength")
 		return
 	}
-	b := data[offset]
+	b := data[0]
 	offset++
 	ret.class = int(b >> 6)
 	ret.isCompound = b&0x20 == 0x20
@@ -354,9 +353,8 @@ func parseTagAndLength(data []byte, initOffset int) (ret tagAndLength, offset in
 	// If the bottom five bits are set, then the tag number is actually base 128
 	// encoded afterwards
 	if ret.tag == 0x1f {
-		var n int
-		ret.tag, n, err = parseBase128Int(bytes.NewReader(data[offset:]))
-		offset += n
+		ret.tag, offset, err = parseBase128Int(bytes.NewReader(data[offset:]))
+		offset++
 		if err != nil {
 			return
 		}
@@ -424,7 +422,9 @@ func parseSequenceOf(data []byte, sliceType reflect.Type, elemType reflect.Type)
 	numElements := 0
 	for offset := 0; offset < len(data); {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(data, offset)
+		n := 0
+		t, n, err = parseTagAndLength(data[offset:])
+		offset += n
 		if err != nil {
 			return
 		}
@@ -497,7 +497,13 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 	// Deal with raw values.
 	if fieldType == rawValueType {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(data, offset)
+		if offset >= len(data) {
+			err = asn1.SyntaxError{"data truncated"}
+			return
+		}
+		n := 0
+		t, n, err = parseTagAndLength(data[offset:])
+		offset += n
 		if err != nil {
 			return
 		}
@@ -514,7 +520,13 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 	// Deal with the ANY type.
 	if ifaceType := fieldType; ifaceType.Kind() == reflect.Interface && ifaceType.NumMethod() == 0 {
 		var t tagAndLength
-		t, offset, err = parseTagAndLength(data, offset)
+		if offset >= len(data) {
+			err = asn1.SyntaxError{"data truncated"}
+			return
+		}
+		n := 0
+		t, n, err = parseTagAndLength(data[offset:])
+		offset += n
 		if err != nil {
 			return
 		}
@@ -565,7 +577,13 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 		return
 	}
 
-	t, offset, err := parseTagAndLength(data, offset)
+	if offset >= len(data) {
+		err = asn1.SyntaxError{"data truncated"}
+		return
+	}
+	n := 0
+	t, n, err := parseTagAndLength(data[offset:])
+	offset += n
 	if err != nil {
 		return
 	}
@@ -580,7 +598,13 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 		}
 		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
 			if t.length > 0 {
-				t, offset, err = parseTagAndLength(data, offset)
+				if offset >= len(data) {
+					err = asn1.SyntaxError{"data truncated"}
+					return
+				}
+				n := 0
+				t, n, err = parseTagAndLength(data[offset:])
+				offset += n
 				if err != nil {
 					return
 				}
