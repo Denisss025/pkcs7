@@ -196,8 +196,7 @@ func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
 	return
 }
 
-// parseBase128Int parses a base-128 encoded int from the given offset in the
-// given byte slice. It returns the value and the new offset.
+// parseBase128Int parses a base-128 encoded int from the given byte reader.
 func parseBase128Int(r io.ByteReader) (ret int, err error) {
 	var b byte
 	for shifted := 0; err == nil; shifted++ {
@@ -332,10 +331,10 @@ func parseUTF8String(data []byte) (ret string, err error) {
 
 // Tagging
 
-// parseTagAndLength parses an ASN.1 tag and length pair from the given offset
-// into a byte slice. It returns the parsed data and the new offset. SET and
-// SET OF (tag 17) are mapped to SEQUENCE and SEQUENCE OF (tag 16) since we
-// don't distinguish between ordered and unordered objects in this code.
+// parseTagAndLength parses an ASN.1 tag and length pair from the given byte
+// reader into a byte slice. SET and SET OF (tag 17) are mapped to SEQUENCE and
+// SEQUENCE OF (tag 16) since we don't distinguish between ordered and
+// unordered objects in this code.
 func parseTagAndLength(r io.ByteReader) (ret tagAndLength, err error) {
 	var b byte
 	b, err = r.ReadByte()
