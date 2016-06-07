@@ -412,54 +412,18 @@ func parseTagAndLength(r io.ByteReader) (ret tagAndLength, err error) {
 // a number of ASN.1 values from the given byte slice and returns them as a
 // slice of Go values of the given type.
 func parseSequenceOf(data []byte, sliceType reflect.Type, elemType reflect.Type) (ret reflect.Value, err error) {
-	expectedTag, compoundType, ok := getUniversalType(elemType)
-	if !ok {
-		err = asn1.StructuralError{"unknown Go type for slice"}
-		return
-	}
-
-	// First we iterate over the input and count the number of elements,
-	// checking that the types are correct in each case.
-	numElements := 0
-	for offset := 0; offset < len(data); {
-		var t tagAndLength
-		r := bytes.NewReader(data[offset:])
-		t, err = parseTagAndLength(r)
-		offset += int(r.Size()) - r.Len()
-		if err != nil {
-			return
-		}
-		switch t.tag {
-		case asn1.TagIA5String, asn1.TagGeneralString, asn1.TagT61String, asn1.TagUTF8String:
-			// We pretend that various other string types are
-			// PRINTABLE STRINGs so that a sequence of them can be
-			// parsed into a []string.
-			t.tag = asn1.TagPrintableString
-		case asn1.TagGeneralizedTime, asn1.TagUTCTime:
-			// Likewise, both time types are treated the same.
-			t.tag = asn1.TagUTCTime
-		}
-
-		if t.class != asn1.ClassUniversal || t.isCompound != compoundType || t.tag != expectedTag {
-			err = asn1.StructuralError{"sequence tag mismatch"}
-			return
-		}
-		if invalidLength(offset, t.length, len(data)) {
-			err = asn1.SyntaxError{"truncated sequence"}
-			return
-		}
-		offset += t.length
-		numElements++
-	}
-	ret = reflect.MakeSlice(sliceType, numElements, numElements)
 	params := fieldParameters{}
 	offset := 0
-	for i := 0; i < numElements; i++ {
-		offset, err = parseField(ret.Index(i), data, offset, params)
-		if err != nil {
-			return
+	ret = reflect.MakeSlice(sliceType, 8, 8)
+	i := 0
+	for ; offset < len(data); i++ {
+		if i == ret.Len() {
+			extra := reflect.MakeSlice(sliceType, 0, i*2)
+			ret = reflect.AppendSlice(extra, ret)
 		}
+		offset, err = parseField(ret.Index(i), data, offset, params)
 	}
+	ret = ret.Slice(0, i)
 	return
 }
 
