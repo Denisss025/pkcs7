@@ -20,7 +20,6 @@ package pkcs7
 // everything by any means.
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/asn1"
 	"errors"
@@ -458,7 +457,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 		return
 	}
 
-	r := bytes.NewReader(data)
+	r := bytes.NewBuffer(data)
 	t, err := parseTagAndLength(r)
 	if err == nil && r.Len() < t.length {
 		err = asn1.SyntaxError{"data truncated"}
@@ -466,13 +465,13 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 	if err != nil {
 		return
 	}
-	offset += int(r.Size()) - r.Len()
+	offset = len(data) - r.Len()
 
 	// Deal with raw values.
 	fieldType := v.Type()
 	if fieldType == rawValueType {
-		result := asn1.RawValue{t.class, t.tag, t.isCompound, data[offset : offset+t.length], data[:offset+t.length]}
-		offset += t.length
+		result := asn1.RawValue{t.class, t.tag, t.isCompound, r.Next(t.length), data[:offset+t.length]}
+		offset = len(data) - r.Len()
 		v.Set(reflect.ValueOf(result))
 		return
 	}
@@ -481,9 +480,8 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 	if ifaceType := fieldType; ifaceType.Kind() == reflect.Interface && ifaceType.NumMethod() == 0 {
 		var result interface{}
 		if !t.isCompound && t.class == asn1.ClassUniversal {
-			innerBytes := data[offset : offset+t.length]
-			inner := bufio.NewReader(io.LimitReader(r,
-				int64(t.length)))
+			innerBytes := r.Next(t.length)
+			inner := bytes.NewReader(innerBytes)
 			switch t.tag {
 			case asn1.TagPrintableString:
 				result, err = parsePrintableString(innerBytes)
@@ -509,7 +507,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 				// If we don't know how to handle the type, we just leave Value as nil.
 			}
 		}
-		offset += t.length
+		offset = len(data) - r.Len()
 		if err != nil {
 			return
 		}
@@ -535,7 +533,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 		}
 		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
 			if t.length > 0 {
-				if offset >= len(data) {
+				if r.Len() == 0 {
 					err = asn1.SyntaxError{"data truncated"}
 					return
 				}
@@ -543,7 +541,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 				if err != nil {
 					return
 				}
-				offset = int(r.Size()) - r.Len()
+				offset = len(data) - r.Len()
 			} else {
 				if fieldType != flagType {
 					err = asn1.StructuralError{"zero length explicit tag was not an asn1.asn1.Flag"}
@@ -613,17 +611,18 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 		}
 		return
 	}
-	if invalidLength(offset, t.length, len(data)) {
+	if r.Len() < t.length {
 		err = asn1.SyntaxError{"data truncated"}
 		return
 	}
-	innerBytes := data[offset : offset+t.length]
-	offset += t.length
+	innerBytes := r.Next(t.length)
+	offset = len(data) - r.Len()
+	inner := bytes.NewBuffer(innerBytes)
 
 	// We deal with the structures defined in this package first.
 	switch fieldType {
 	case objectIdentifierType:
-		newSlice, err1 := parseObjectIdentifier(bytes.NewReader(innerBytes))
+		newSlice, err1 := parseObjectIdentifier(inner)
 		v.Set(reflect.MakeSlice(v.Type(), len(newSlice), len(newSlice)))
 		if err1 == nil {
 			reflect.Copy(v, reflect.ValueOf(newSlice))
@@ -725,7 +724,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 			reflect.Copy(val, reflect.ValueOf(innerBytes))
 			return
 		}
-		newSlice, err1 := parseSequenceOf(bytes.NewBuffer(innerBytes), sliceType, sliceType.Elem())
+		newSlice, err1 := parseSequenceOf(inner, sliceType, sliceType.Elem())
 		if err1 == nil {
 			val.Set(newSlice)
 		}
