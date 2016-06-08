@@ -413,7 +413,6 @@ func parseTagAndLength(r io.ByteReader) (ret tagAndLength, err error) {
 // slice of Go values of the given type.
 func parseSequenceOf(r *bytes.Buffer, sliceType reflect.Type, elemType reflect.Type) (ret reflect.Value, err error) {
 	params := fieldParameters{}
-	n := 0
 	ret = reflect.MakeSlice(sliceType, 8, 8)
 	i := 0
 	for ; r.Len() > 0; i++ {
@@ -421,8 +420,7 @@ func parseSequenceOf(r *bytes.Buffer, sliceType reflect.Type, elemType reflect.T
 			extra := reflect.MakeSlice(sliceType, 0, i*2)
 			ret = reflect.AppendSlice(extra, ret)
 		}
-		n, err = parseField(ret.Index(i), r.Bytes(), params)
-		r.Next(n)
+		_, err = parseField(ret.Index(i), r, params)
 	}
 	ret = ret.Slice(0, i)
 	return
@@ -448,16 +446,17 @@ func invalidLength(offset, length, sliceLength int) bool {
 // parseField is the main parsing function. Given a byte slice and an offset
 // into the array, it will try to parse a suitable ASN.1 value out and store it
 // in the given Value.
-func parseField(v reflect.Value, data []byte, params fieldParameters) (offset int, err error) {
+func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offset int, err error) {
 	// If we have run out of data, it may be that there are optional elements at the end.
-	if len(data) == 0 {
+
+	dataSize := r.Len()
+	if dataSize == 0 {
 		if !setDefaultValue(v, params) {
 			err = asn1.SyntaxError{"sequence truncated"}
 		}
 		return
 	}
-
-	r := bytes.NewBuffer(data)
+	data := r.Bytes()
 	t, err := parseTagAndLength(r)
 	if err == nil && r.Len() < t.length {
 		err = asn1.SyntaxError{"data truncated"}
@@ -465,13 +464,12 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 	if err != nil {
 		return
 	}
-	offset = len(data) - r.Len()
+	offset = dataSize - r.Len() + t.length
 
 	// Deal with raw values.
 	fieldType := v.Type()
 	if fieldType == rawValueType {
-		result := asn1.RawValue{t.class, t.tag, t.isCompound, r.Next(t.length), data[:offset+t.length]}
-		offset = len(data) - r.Len()
+		result := asn1.RawValue{t.class, t.tag, t.isCompound, r.Next(t.length), data[:offset]}
 		v.Set(reflect.ValueOf(result))
 		return
 	}
@@ -507,11 +505,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 				// If we don't know how to handle the type, we just leave Value as nil.
 			}
 		}
-		offset = len(data) - r.Len()
-		if err != nil {
-			return
-		}
-		if result != nil {
+		if err == nil && result != nil {
 			v.Set(reflect.ValueOf(result))
 		}
 		return
@@ -541,7 +535,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 				if err != nil {
 					return
 				}
-				offset = len(data) - r.Len()
+				offset = dataSize - r.Len()
 			} else {
 				if fieldType != flagType {
 					err = asn1.StructuralError{"zero length explicit tag was not an asn1.asn1.Flag"}
@@ -616,7 +610,7 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 		return
 	}
 	innerBytes := r.Next(t.length)
-	offset = len(data) - r.Len()
+	offset = dataSize - r.Len()
 	inner := bytes.NewBuffer(innerBytes)
 
 	// We deal with the structures defined in this package first.
@@ -707,7 +701,8 @@ func parseField(v reflect.Value, data []byte, params fieldParameters) (offset in
 				continue
 			}
 			n := 0
-			n, err = parseField(val.Field(i), innerBytes[innerOffset:], parseFieldParameters(field.Tag.Get("asn1")))
+			inner := bytes.NewBuffer(innerBytes[innerOffset:])
+			n, err = parseField(val.Field(i), inner, parseFieldParameters(field.Tag.Get("asn1")))
 			innerOffset += n
 			if err != nil {
 				return
@@ -841,9 +836,10 @@ func setDefaultValue(v reflect.Value, params fieldParameters) (ok bool) {
 // Unmarshal returns a parse error.
 func Unmarshal(b []byte, val interface{}) (rest []byte, err error) {
 	v := reflect.ValueOf(val).Elem()
-	offset, err := parseField(v, b, parseFieldParameters(""))
-	if err != nil {
-		return nil, err
+	r := bytes.NewBuffer(b)
+	_, err = parseField(v, r, parseFieldParameters(""))
+	if err == nil {
+		rest = r.Bytes()
 	}
-	return b[offset:], nil
+	return
 }
