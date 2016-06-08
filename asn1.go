@@ -437,12 +437,6 @@ var (
 	bigIntType           = reflect.TypeOf(new(big.Int))
 )
 
-// invalidLength returns true iff offset + length > sliceLength, or if the
-// addition would overflow.
-func invalidLength(offset, length, sliceLength int) bool {
-	return offset+length < offset || offset+length > sliceLength
-}
-
 // parseField is the main parsing function. Given a byte slice and an offset
 // into the array, it will try to parse a suitable ASN.1 value out and store it
 // in the given Value.
@@ -527,15 +521,13 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		}
 		if t.class == expectedClass && t.tag == *params.tag && (t.length == 0 || t.isCompound) {
 			if t.length > 0 {
-				if r.Len() == 0 {
-					err = asn1.SyntaxError{"data truncated"}
-					return
-				}
 				t, err = parseTagAndLength(r)
+				if err == nil && r.Len() < t.length {
+					err = asn1.SyntaxError{"data truncated"}
+				}
 				if err != nil {
 					return
 				}
-				offset = dataSize - r.Len()
 			} else {
 				if fieldType != flagType {
 					err = asn1.StructuralError{"zero length explicit tag was not an asn1.asn1.Flag"}
@@ -605,10 +597,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		}
 		return
 	}
-	if r.Len() < t.length {
-		err = asn1.SyntaxError{"data truncated"}
-		return
-	}
+
 	innerBytes := r.Next(t.length)
 	offset = dataSize - r.Len()
 	inner := bytes.NewBuffer(innerBytes)
