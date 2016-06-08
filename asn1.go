@@ -33,74 +33,91 @@ import (
 
 // BOOLEAN
 
-func parseBool(data []byte) (ret bool, err error) {
-	if len(data) != 1 {
+func parseBool(r io.ByteReader, size int) (ret bool, err error) {
+	if size != 1 {
 		err = asn1.SyntaxError{"invalid boolean"}
 		return
 	}
 
-	// DER demands that "If the encoding represents the boolean value TRUE,
-	// its single contents octet shall have all eight bits set to one."
-	// Thus only 0 and 255 are valid encoded values.
-	switch data[0] {
-	case 0:
+	var b byte
+	b, err = r.ReadByte()
+	switch b {
+	case 0x00:
 		ret = false
 	case 0xff:
 		ret = true
 	default:
 		err = asn1.SyntaxError{"invalid boolean"}
 	}
-
 	return
 }
 
 // INTEGER
 
-// checkInteger returns nil if the given bytes are a valid DER-encoded
-// INTEGER and an error otherwise.
+func parseImpl(r io.Reader, length int, validate func([]byte) error,
+	postProcess func([]byte) error) error {
+	if length == 0 {
+		return asn1.StructuralError{"empty value"}
+	}
+
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+
+	_, err := io.CopyN(buf, r, int64(length))
+	if err != nil {
+		return err
+	}
+	data := buf.Bytes()
+
+	if validate != nil {
+		err = validate(data)
+	}
+	if err == nil {
+		err = postProcess(data)
+	}
+	return err
+}
+
 func checkInteger(data []byte) error {
-	if len(data) == 0 {
-		return asn1.StructuralError{"empty integer"}
-	}
-	if len(data) == 1 {
-		return nil
-	}
-	if (data[0] == 0 && data[1]&0x80 == 0) || (data[0] == 0xff && data[1]&0x80 == 0x80) {
-		return asn1.StructuralError{"integer not minimally-encoded"}
+	if len(data) > 1 {
+		if (data[0] == 0 && data[1]&0x80 == 0) ||
+			(data[0] == 0xff && data[1]&0x80 == 0x80) {
+			return asn1.StructuralError{
+				"integer not minimally-encoded",
+			}
+		}
 	}
 	return nil
 }
 
 // parseInt64 treats the given bytes as a big-endian, signed integer and
 // returns the result.
-func parseInt64(data []byte) (ret int64, err error) {
-	err = checkInteger(data)
-	if err != nil {
-		return
-	}
-	if len(data) > 8 {
-		// We'll overflow an int64 in this case.
+func parseInt64(r io.Reader, length int) (ret int64, err error) {
+	if length > 8 {
 		err = asn1.StructuralError{"integer too large"}
 		return
 	}
-	for bytesRead := 0; bytesRead < len(data); bytesRead++ {
-		ret <<= 8
-		ret |= int64(data[bytesRead])
-	}
 
-	// Shift up and down in order to sign extend the result.
-	ret <<= 64 - uint8(len(data))*8
-	ret >>= 64 - uint8(len(data))*8
+	err = parseImpl(r, length, checkInteger, func(data []byte) error {
+		for _, b := range data {
+			ret <<= 8
+			ret |= int64(b)
+		}
+		ret <<= 64 - uint8(len(data))*8
+		ret >>= 64 - uint8(len(data))*8
+		return nil
+	})
 	return
 }
 
 // parseInt treats the given bytes as a big-endian, signed integer and returns
 // the result.
-func parseInt32(data []byte) (int32, error) {
-	if err := checkInteger(data); err != nil {
-		return 0, err
+func parseInt32(r io.Reader, length int) (int32, error) {
+	if length > 4 {
+		return 0, asn1.StructuralError{"integer too large"}
 	}
-	ret64, err := parseInt64(data)
+	ret64, err := parseInt64(r, length)
 	if err != nil {
 		return 0, err
 	}
@@ -114,41 +131,40 @@ var bigOne = big.NewInt(1)
 
 // parseBigInt treats the given bytes as a big-endian, signed integer and returns
 // the result.
-func parseBigInt(data []byte) (*big.Int, error) {
-	if err := checkInteger(data); err != nil {
-		return nil, err
-	}
+func parseBigInt(r io.Reader, length int) (*big.Int, error) {
 	ret := new(big.Int)
-	if len(data) > 0 && data[0]&0x80 == 0x80 {
-		// This is a negative number.
-		notBytes := make([]byte, len(data))
-		for i := range notBytes {
-			notBytes[i] = ^data[i]
+	err := parseImpl(r, length, checkInteger, func(data []byte) error {
+		if len(data) > 0 && data[0]&0x80 == 0x80 {
+			// This is a negative number.
+			notBytes := make([]byte, len(data))
+			for i := range notBytes {
+				notBytes[i] = ^data[i]
+			}
+			ret.SetBytes(notBytes)
+			ret.Add(ret, bigOne)
+			ret.Neg(ret)
+			return nil
 		}
-		ret.SetBytes(notBytes)
-		ret.Add(ret, bigOne)
-		ret.Neg(ret)
-		return ret, nil
-	}
-	ret.SetBytes(data)
-	return ret, nil
+		ret.SetBytes(data)
+		return nil
+	})
+
+	return ret, err
 }
 
 // parseBitString parses an ASN.1 bit string from the given byte slice and returns it.
-func parseBitString(data []byte) (ret asn1.BitString, err error) {
-	if len(data) == 0 {
-		err = asn1.SyntaxError{"zero length BIT STRING"}
-		return
-	}
-	paddingBits := int(data[0])
-	if paddingBits > 7 ||
-		len(data) == 1 && paddingBits > 0 ||
-		data[len(data)-1]&((1<<data[0])-1) != 0 {
-		err = asn1.SyntaxError{"invalid padding bits in BIT STRING"}
-		return
-	}
-	ret.BitLength = (len(data)-1)*8 - paddingBits
-	ret.Bytes = data[1:]
+func parseBitString(r io.Reader, length int) (ret asn1.BitString, err error) {
+	err = parseImpl(r, length, nil, func(data []byte) error {
+		paddingBits := int(data[0])
+		if paddingBits > 7 ||
+			len(data) == 1 && paddingBits > 0 ||
+			data[len(data)-1]&((1<<data[0])-1) != 0 {
+			return asn1.SyntaxError{"invalid padding bits in BIT STRING"}
+		}
+		ret.BitLength = (len(data)-1)*8 - paddingBits
+		ret.Bytes = data[1:]
+		return nil
+	})
 	return
 }
 
@@ -220,8 +236,11 @@ func parseBase128Int(r io.ByteReader) (ret int, err error) {
 
 // UTCTime
 
-func parseUTCTime(data []byte) (ret time.Time, err error) {
-	s := string(data)
+func parseUTCTime(r io.Reader, length int) (ret time.Time, err error) {
+	var s string
+	if s, err = parseT61String(r, length); err != nil {
+		return
+	}
 
 	formatStr := "0601021504Z0700"
 	ret, err = time.Parse(formatStr, s)
@@ -248,9 +267,12 @@ func parseUTCTime(data []byte) (ret time.Time, err error) {
 
 // parseGeneralizedTime parses the GeneralizedTime from the given byte slice
 // and returns the resulting time.
-func parseGeneralizedTime(data []byte) (ret time.Time, err error) {
+func parseGeneralizedTime(r io.Reader, length int) (ret time.Time, err error) {
 	const formatStr = "20060102150405Z0700"
-	s := string(data)
+	var s string
+	if s, err = parseT61String(r, length); err != nil {
+		return
+	}
 
 	if ret, err = time.Parse(formatStr, s); err != nil {
 		return
@@ -263,50 +285,58 @@ func parseGeneralizedTime(data []byte) (ret time.Time, err error) {
 	return
 }
 
+func toString(s *string) func([]byte) error {
+	return func(data []byte) error {
+		*s = string(data)
+		return nil
+	}
+}
+
 // PrintableString
 
 // parsePrintableString parses a ASN.1 PrintableString from the given byte
 // array and returns it.
-func parsePrintableString(data []byte) (ret string, err error) {
-	for _, b := range data {
-		if !isPrintable(b) {
-			err = asn1.SyntaxError{"PrintableString contains invalid character"}
-			return
-		}
-	}
-	ret = string(data)
+func parsePrintableString(r io.Reader, length int) (ret string, err error) {
+	err = parseImpl(r, length, checkPrintable, toString(&ret))
 	return
 }
 
 // isPrintable reports whether the given b is in the ASN.1 PrintableString set.
-func isPrintable(b byte) bool {
-	return 'a' <= b && b <= 'z' ||
-		'A' <= b && b <= 'Z' ||
-		'0' <= b && b <= '9' ||
-		'\'' <= b && b <= ')' ||
-		'+' <= b && b <= '/' ||
-		b == ' ' ||
-		b == ':' ||
-		b == '=' ||
-		b == '?' ||
-		// This is technically not allowed in a PrintableString.
-		// However, x509 certificates with wildcard strings don't
-		// always use the correct string type so we permit it.
-		b == '*'
+func checkPrintable(data []byte) error {
+	for _, b := range data {
+		if !('a' <= b && b <= 'z' ||
+			'A' <= b && b <= 'Z' ||
+			'0' <= b && b <= '9' ||
+			'\'' <= b && b <= ')' ||
+			'+' <= b && b <= '/' ||
+			b == ' ' ||
+			b == ':' ||
+			b == '=' ||
+			b == '?' ||
+			// This is technically not allowed in a PrintableString.
+			// However, x509 certificates with wildcard strings don't
+			// always use the correct string type so we permit it.
+			b == '*') {
+			return asn1.SyntaxError{
+				"PrintableString contains invalid character"}
+		}
+	}
+	return nil
 }
 
 // IA5String
 
 // parseIA5String parses a ASN.1 IA5String (ASCII string) from the given
 // byte slice and returns it.
-func parseIA5String(data []byte) (ret string, err error) {
-	for _, b := range data {
-		if b >= 0x80 {
-			err = asn1.SyntaxError{"IA5String contains invalid character"}
-			return
+func parseIA5String(r io.Reader, length int) (ret string, err error) {
+	err = parseImpl(r, length, func(data []byte) error {
+		for _, b := range data {
+			if b >= 0x80 {
+				return asn1.SyntaxError{"IA5String contains invalid character"}
+			}
 		}
-	}
-	ret = string(data)
+		return nil
+	}, toString(&ret))
 	return
 }
 
@@ -314,19 +344,23 @@ func parseIA5String(data []byte) (ret string, err error) {
 
 // parseT61String parses a ASN.1 T61String (8-bit clean string) from the given
 // byte slice and returns it.
-func parseT61String(data []byte) (ret string, err error) {
-	return string(data), nil
+func parseT61String(r io.Reader, length int) (ret string, err error) {
+	err = parseImpl(r, length, nil, toString(&ret))
+	return
 }
 
 // UTF8String
 
 // parseUTF8String parses a ASN.1 UTF8String (raw UTF-8) from the given byte
 // array and returns it.
-func parseUTF8String(data []byte) (ret string, err error) {
-	if !utf8.Valid(data) {
-		return "", errors.New("asn1: invalid UTF-8 string")
-	}
-	return string(data), nil
+func parseUTF8String(r io.Reader, length int) (ret string, err error) {
+	err = parseImpl(r, length, func(data []byte) error {
+		if !utf8.Valid(data) {
+			return asn1.SyntaxError{"invalid UTF-8 string"}
+		}
+		return nil
+	}, toString(&ret))
+	return
 }
 
 // Tagging
@@ -472,31 +506,30 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 	if ifaceType := fieldType; ifaceType.Kind() == reflect.Interface && ifaceType.NumMethod() == 0 {
 		var result interface{}
 		if !t.isCompound && t.class == asn1.ClassUniversal {
-			innerBytes := r.Next(t.length)
-			inner := bytes.NewReader(innerBytes)
 			switch t.tag {
 			case asn1.TagPrintableString:
-				result, err = parsePrintableString(innerBytes)
+				result, err = parsePrintableString(r, t.length)
 			case asn1.TagIA5String:
-				result, err = parseIA5String(innerBytes)
+				result, err = parseIA5String(r, t.length)
 			case asn1.TagT61String:
-				result, err = parseT61String(innerBytes)
+				result, err = parseT61String(r, t.length)
 			case asn1.TagUTF8String:
-				result, err = parseUTF8String(innerBytes)
+				result, err = parseUTF8String(r, t.length)
 			case asn1.TagInteger:
-				result, err = parseInt64(innerBytes)
+				result, err = parseInt64(r, t.length)
 			case asn1.TagBitString:
-				result, err = parseBitString(innerBytes)
+				result, err = parseBitString(r, t.length)
 			case asn1.TagOID:
-				result, err = parseObjectIdentifier(inner)
+				result, err = parseObjectIdentifier(bytes.NewReader(r.Next(t.length)))
 			case asn1.TagUTCTime:
-				result, err = parseUTCTime(innerBytes)
+				result, err = parseUTCTime(r, t.length)
 			case asn1.TagGeneralizedTime:
-				result, err = parseGeneralizedTime(innerBytes)
+				result, err = parseGeneralizedTime(r, t.length)
 			case asn1.TagOctetString:
-				result = innerBytes
+				result = r.Next(t.length)
 			default:
 				// If we don't know how to handle the type, we just leave Value as nil.
+				r.Next(t.length)
 			}
 		}
 		if err == nil && result != nil {
@@ -613,7 +646,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		err = err1
 		return
 	case bitStringType:
-		bs, err1 := parseBitString(innerBytes)
+		bs, err1 := parseBitString(inner, t.length)
 		if err1 == nil {
 			v.Set(reflect.ValueOf(bs))
 		}
@@ -623,9 +656,9 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		var time time.Time
 		var err1 error
 		if universalTag == asn1.TagUTCTime {
-			time, err1 = parseUTCTime(innerBytes)
+			time, err1 = parseUTCTime(inner, t.length)
 		} else {
-			time, err1 = parseGeneralizedTime(innerBytes)
+			time, err1 = parseGeneralizedTime(inner, t.length)
 		}
 		if err1 == nil {
 			v.Set(reflect.ValueOf(time))
@@ -633,7 +666,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		err = err1
 		return
 	case enumeratedType:
-		parsedInt, err1 := parseInt32(innerBytes)
+		parsedInt, err1 := parseInt32(inner, t.length)
 		if err1 == nil {
 			v.SetInt(int64(parsedInt))
 		}
@@ -643,7 +676,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		v.SetBool(true)
 		return
 	case bigIntType:
-		parsedInt, err1 := parseBigInt(innerBytes)
+		parsedInt, err1 := parseBigInt(inner, t.length)
 		if err1 == nil {
 			v.Set(reflect.ValueOf(parsedInt))
 		}
@@ -652,7 +685,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 	}
 	switch val := v; val.Kind() {
 	case reflect.Bool:
-		parsedBool, err1 := parseBool(innerBytes)
+		parsedBool, err1 := parseBool(inner, t.length)
 		if err1 == nil {
 			val.SetBool(parsedBool)
 		}
@@ -660,13 +693,13 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		return
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		if val.Type().Size() == 4 {
-			parsedInt, err1 := parseInt32(innerBytes)
+			parsedInt, err1 := parseInt32(inner, t.length)
 			if err1 == nil {
 				val.SetInt(int64(parsedInt))
 			}
 			err = err1
 		} else {
-			parsedInt, err1 := parseInt64(innerBytes)
+			parsedInt, err1 := parseInt64(inner, t.length)
 			if err1 == nil {
 				val.SetInt(parsedInt)
 			}
@@ -718,19 +751,19 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		var v string
 		switch universalTag {
 		case asn1.TagPrintableString:
-			v, err = parsePrintableString(innerBytes)
+			v, err = parsePrintableString(inner, t.length)
 		case asn1.TagIA5String:
-			v, err = parseIA5String(innerBytes)
+			v, err = parseIA5String(inner, t.length)
 		case asn1.TagT61String:
-			v, err = parseT61String(innerBytes)
+			v, err = parseT61String(inner, t.length)
 		case asn1.TagUTF8String:
-			v, err = parseUTF8String(innerBytes)
+			v, err = parseUTF8String(inner, t.length)
 		case asn1.TagGeneralString:
 			// GeneralString is specified in ISO-2022/ECMA-35,
 			// A brief review suggests that it includes structures
 			// that allow the encoding to change midstring and
 			// such. We give up and pass it as an 8-bit string.
-			v, err = parseT61String(innerBytes)
+			v, err = parseT61String(inner, t.length)
 		default:
 			err = asn1.SyntaxError{fmt.Sprintf("internal error: unknown string type %d", universalTag)}
 		}
