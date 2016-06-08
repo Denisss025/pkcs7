@@ -20,6 +20,7 @@ package pkcs7
 // everything by any means.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/asn1"
 	"errors"
@@ -411,17 +412,18 @@ func parseTagAndLength(r io.ByteReader) (ret tagAndLength, err error) {
 // parseSequenceOf is used for SEQUENCE OF and SET OF values. It tries to parse
 // a number of ASN.1 values from the given byte slice and returns them as a
 // slice of Go values of the given type.
-func parseSequenceOf(data []byte, sliceType reflect.Type, elemType reflect.Type) (ret reflect.Value, err error) {
+func parseSequenceOf(r *bytes.Buffer, sliceType reflect.Type, elemType reflect.Type) (ret reflect.Value, err error) {
 	params := fieldParameters{}
-	offset := 0
+	n := 0
 	ret = reflect.MakeSlice(sliceType, 8, 8)
 	i := 0
-	for ; offset < len(data); i++ {
+	for ; r.Len() > 0; i++ {
 		if i == ret.Len() {
 			extra := reflect.MakeSlice(sliceType, 0, i*2)
 			ret = reflect.AppendSlice(extra, ret)
 		}
-		offset, err = parseField(ret.Index(i), data, offset, params)
+		n, err = parseField(ret.Index(i), r.Bytes(), params)
+		r.Next(n)
 	}
 	ret = ret.Slice(0, i)
 	return
@@ -447,36 +449,29 @@ func invalidLength(offset, length, sliceLength int) bool {
 // parseField is the main parsing function. Given a byte slice and an offset
 // into the array, it will try to parse a suitable ASN.1 value out and store it
 // in the given Value.
-func parseField(v reflect.Value, data []byte, initOffset int, params fieldParameters) (offset int, err error) {
-	offset = initOffset
-	fieldType := v.Type()
-
+func parseField(v reflect.Value, data []byte, params fieldParameters) (offset int, err error) {
 	// If we have run out of data, it may be that there are optional elements at the end.
-	if offset == len(data) {
+	if len(data) == 0 {
 		if !setDefaultValue(v, params) {
 			err = asn1.SyntaxError{"sequence truncated"}
 		}
 		return
 	}
 
+	r := bytes.NewReader(data)
+	t, err := parseTagAndLength(r)
+	if err == nil && r.Len() < t.length {
+		err = asn1.SyntaxError{"data truncated"}
+	}
+	if err != nil {
+		return
+	}
+	offset += int(r.Size()) - r.Len()
+
 	// Deal with raw values.
+	fieldType := v.Type()
 	if fieldType == rawValueType {
-		var t tagAndLength
-		if offset >= len(data) {
-			err = asn1.SyntaxError{"data truncated"}
-			return
-		}
-		r := bytes.NewReader(data[offset:])
-		t, err = parseTagAndLength(r)
-		offset += int(r.Size()) - r.Len()
-		if err != nil {
-			return
-		}
-		if invalidLength(offset, t.length, len(data)) {
-			err = asn1.SyntaxError{"data truncated"}
-			return
-		}
-		result := asn1.RawValue{t.class, t.tag, t.isCompound, data[offset : offset+t.length], data[initOffset : offset+t.length]}
+		result := asn1.RawValue{t.class, t.tag, t.isCompound, data[offset : offset+t.length], data[:offset+t.length]}
 		offset += t.length
 		v.Set(reflect.ValueOf(result))
 		return
@@ -484,24 +479,11 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 
 	// Deal with the ANY type.
 	if ifaceType := fieldType; ifaceType.Kind() == reflect.Interface && ifaceType.NumMethod() == 0 {
-		var t tagAndLength
-		if offset >= len(data) {
-			err = asn1.SyntaxError{"data truncated"}
-			return
-		}
-		r := bytes.NewReader(data[offset:])
-		t, err = parseTagAndLength(r)
-		offset += int(r.Size()) - r.Len()
-		if err != nil {
-			return
-		}
-		if invalidLength(offset, t.length, len(data)) {
-			err = asn1.SyntaxError{"data truncated"}
-			return
-		}
 		var result interface{}
 		if !t.isCompound && t.class == asn1.ClassUniversal {
 			innerBytes := data[offset : offset+t.length]
+			inner := bufio.NewReader(io.LimitReader(r,
+				int64(t.length)))
 			switch t.tag {
 			case asn1.TagPrintableString:
 				result, err = parsePrintableString(innerBytes)
@@ -516,7 +498,7 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			case asn1.TagBitString:
 				result, err = parseBitString(innerBytes)
 			case asn1.TagOID:
-				result, err = parseObjectIdentifier(bytes.NewReader(innerBytes))
+				result, err = parseObjectIdentifier(inner)
 			case asn1.TagUTCTime:
 				result, err = parseUTCTime(innerBytes)
 			case asn1.TagGeneralizedTime:
@@ -542,22 +524,12 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 		return
 	}
 
-	if offset >= len(data) {
-		err = asn1.SyntaxError{"data truncated"}
-		return
-	}
-	r := bytes.NewReader(data[offset:])
-	t, err := parseTagAndLength(r)
-	offset += int(r.Size()) - r.Len()
-	if err != nil {
-		return
-	}
 	if params.explicit {
 		expectedClass := asn1.ClassContextSpecific
 		if params.application {
 			expectedClass = asn1.ClassApplication
 		}
-		if offset == len(data) {
+		if r.Len() == 0 {
 			err = asn1.StructuralError{"explicit tag has no child"}
 			return
 		}
@@ -567,12 +539,11 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 					err = asn1.SyntaxError{"data truncated"}
 					return
 				}
-				r := bytes.NewReader(data[offset:])
 				t, err = parseTagAndLength(r)
-				offset += int(r.Size()) - r.Len()
 				if err != nil {
 					return
 				}
+				offset = int(r.Size()) - r.Len()
 			} else {
 				if fieldType != flagType {
 					err = asn1.StructuralError{"zero length explicit tag was not an asn1.asn1.Flag"}
@@ -585,7 +556,7 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			// The tags didn't match, it might be an optional element.
 			ok := setDefaultValue(v, params)
 			if ok {
-				offset = initOffset
+				offset = 0
 			} else {
 				err = asn1.StructuralError{"explicitly tagged member didn't match"}
 			}
@@ -636,7 +607,7 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 		// Tags don't match. Again, it could be an optional element.
 		ok := setDefaultValue(v, params)
 		if ok {
-			offset = initOffset
+			offset = 0
 		} else {
 			err = asn1.StructuralError{fmt.Sprintf("tags don't match (%d vs %+v) %+v %s @%d", expectedTag, t, params, fieldType.Name(), offset)}
 		}
@@ -726,7 +697,7 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 
 		if structType.NumField() > 0 &&
 			structType.Field(0).Type == rawContentsType {
-			dataBytes := data[initOffset:offset]
+			dataBytes := data[:offset]
 			val.Field(0).Set(reflect.ValueOf(asn1.RawContent(dataBytes)))
 		}
 
@@ -736,7 +707,9 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			if i == 0 && field.Type == rawContentsType {
 				continue
 			}
-			innerOffset, err = parseField(val.Field(i), innerBytes, innerOffset, parseFieldParameters(field.Tag.Get("asn1")))
+			n := 0
+			n, err = parseField(val.Field(i), innerBytes[innerOffset:], parseFieldParameters(field.Tag.Get("asn1")))
+			innerOffset += n
 			if err != nil {
 				return
 			}
@@ -752,7 +725,7 @@ func parseField(v reflect.Value, data []byte, initOffset int, params fieldParame
 			reflect.Copy(val, reflect.ValueOf(innerBytes))
 			return
 		}
-		newSlice, err1 := parseSequenceOf(innerBytes, sliceType, sliceType.Elem())
+		newSlice, err1 := parseSequenceOf(bytes.NewBuffer(innerBytes), sliceType, sliceType.Elem())
 		if err1 == nil {
 			val.Set(newSlice)
 		}
@@ -869,7 +842,7 @@ func setDefaultValue(v reflect.Value, params fieldParameters) (ok bool) {
 // Unmarshal returns a parse error.
 func Unmarshal(b []byte, val interface{}) (rest []byte, err error) {
 	v := reflect.ValueOf(val).Elem()
-	offset, err := parseField(v, b, 0, parseFieldParameters(""))
+	offset, err := parseField(v, b, parseFieldParameters(""))
 	if err != nil {
 		return nil, err
 	}
