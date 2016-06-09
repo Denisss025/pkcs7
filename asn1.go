@@ -164,6 +164,8 @@ func parseBitString(r io.Reader, length int) (ret asn1.BitString, err error) {
 		}
 		ret.BitLength = (len(data)-1)*8 - paddingBits
 		ret.Bytes = data[1:]
+		ret.Bytes = make([]byte, len(data)-1, len(data)-1)
+		copy(ret.Bytes, data[1:])
 		return nil
 	})
 	return
