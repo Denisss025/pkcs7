@@ -20,6 +20,7 @@ package pkcs7
 // everything by any means.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/asn1"
 	"errors"
@@ -171,12 +172,13 @@ func parseBitString(r io.Reader, length int) (ret asn1.BitString, err error) {
 // parseObjectIdentifier parses an OBJECT IDENTIFIER from the given bytes and
 // returns it. An object identifier is a sequence of variable length integers
 // that are assigned in a hierarchy.
-func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
+func parseObjectIdentifier(r io.Reader, length int) (s []int, err error) {
 	// The first varint is 40*value1 + value2:
 	// According to this packing, value1 can take the values 0, 1 and 2 only.
 	// When value1 = 0 or value1 = 1, then value2 is <= 39. When value1 = 2,
 	// then there are no restrictions on value2.
-	v, err := parseBase128Int(r)
+	br := bufio.NewReader(io.LimitReader(r, int64(length)))
+	v, err := parseBase128Int(br)
 	if err == io.EOF {
 		err = asn1.SyntaxError{"zero length OBJECT IDENTIFIER"}
 		return
@@ -192,7 +194,7 @@ func parseObjectIdentifier(r io.ByteReader) (s []int, err error) {
 	}
 
 	for err == nil {
-		v, err = parseBase128Int(r)
+		v, err = parseBase128Int(br)
 		if err == io.EOF {
 		} else if err != nil {
 			return
@@ -520,7 +522,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 			case asn1.TagBitString:
 				result, err = parseBitString(r, t.length)
 			case asn1.TagOID:
-				result, err = parseObjectIdentifier(bytes.NewReader(r.Next(t.length)))
+				result, err = parseObjectIdentifier(r, t.length)
 			case asn1.TagUTCTime:
 				result, err = parseUTCTime(r, t.length)
 			case asn1.TagGeneralizedTime:
@@ -631,14 +633,12 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		return
 	}
 
-	innerBytes := r.Next(t.length)
-	offset = dataSize - r.Len()
-	inner := bytes.NewBuffer(innerBytes)
+	offset = dataSize - r.Len() + t.length
 
 	// We deal with the structures defined in this package first.
 	switch fieldType {
 	case objectIdentifierType:
-		newSlice, err1 := parseObjectIdentifier(inner)
+		newSlice, err1 := parseObjectIdentifier(r, t.length)
 		v.Set(reflect.MakeSlice(v.Type(), len(newSlice), len(newSlice)))
 		if err1 == nil {
 			reflect.Copy(v, reflect.ValueOf(newSlice))
@@ -646,7 +646,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		err = err1
 		return
 	case bitStringType:
-		bs, err1 := parseBitString(inner, t.length)
+		bs, err1 := parseBitString(r, t.length)
 		if err1 == nil {
 			v.Set(reflect.ValueOf(bs))
 		}
@@ -656,9 +656,9 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		var time time.Time
 		var err1 error
 		if universalTag == asn1.TagUTCTime {
-			time, err1 = parseUTCTime(inner, t.length)
+			time, err1 = parseUTCTime(r, t.length)
 		} else {
-			time, err1 = parseGeneralizedTime(inner, t.length)
+			time, err1 = parseGeneralizedTime(r, t.length)
 		}
 		if err1 == nil {
 			v.Set(reflect.ValueOf(time))
@@ -666,7 +666,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		err = err1
 		return
 	case enumeratedType:
-		parsedInt, err1 := parseInt32(inner, t.length)
+		parsedInt, err1 := parseInt32(r, t.length)
 		if err1 == nil {
 			v.SetInt(int64(parsedInt))
 		}
@@ -676,7 +676,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		v.SetBool(true)
 		return
 	case bigIntType:
-		parsedInt, err1 := parseBigInt(inner, t.length)
+		parsedInt, err1 := parseBigInt(r, t.length)
 		if err1 == nil {
 			v.Set(reflect.ValueOf(parsedInt))
 		}
@@ -685,7 +685,7 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 	}
 	switch val := v; val.Kind() {
 	case reflect.Bool:
-		parsedBool, err1 := parseBool(inner, t.length)
+		parsedBool, err1 := parseBool(r, t.length)
 		if err1 == nil {
 			val.SetBool(parsedBool)
 		}
@@ -693,13 +693,13 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		return
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		if val.Type().Size() == 4 {
-			parsedInt, err1 := parseInt32(inner, t.length)
+			parsedInt, err1 := parseInt32(r, t.length)
 			if err1 == nil {
 				val.SetInt(int64(parsedInt))
 			}
 			err = err1
 		} else {
-			parsedInt, err1 := parseInt64(inner, t.length)
+			parsedInt, err1 := parseInt64(r, t.length)
 			if err1 == nil {
 				val.SetInt(parsedInt)
 			}
@@ -717,14 +717,15 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		}
 
 		innerOffset := 0
+		innerBytes := r.Next(t.length)
 		for i := 0; i < structType.NumField(); i++ {
 			field := structType.Field(i)
 			if i == 0 && field.Type == rawContentsType {
 				continue
 			}
 			n := 0
-			inner := bytes.NewBuffer(innerBytes[innerOffset:])
-			n, err = parseField(val.Field(i), inner, parseFieldParameters(field.Tag.Get("asn1")))
+			inner2 := bytes.NewBuffer(innerBytes[innerOffset:])
+			n, err = parseField(val.Field(i), inner2, parseFieldParameters(field.Tag.Get("asn1")))
 			innerOffset += n
 			if err != nil {
 				return
@@ -737,11 +738,12 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 	case reflect.Slice:
 		sliceType := fieldType
 		if sliceType.Elem().Kind() == reflect.Uint8 {
-			val.Set(reflect.MakeSlice(sliceType, len(innerBytes), len(innerBytes)))
-			reflect.Copy(val, reflect.ValueOf(innerBytes))
+			val.Set(reflect.MakeSlice(sliceType, t.length, t.length))
+			reflect.Copy(val, reflect.ValueOf(r.Next(t.length)))
 			return
 		}
-		newSlice, err1 := parseSequenceOf(inner, sliceType, sliceType.Elem())
+		inner2 := bytes.NewBuffer(r.Next(t.length))
+		newSlice, err1 := parseSequenceOf(inner2, sliceType, sliceType.Elem())
 		if err1 == nil {
 			val.Set(newSlice)
 		}
@@ -751,20 +753,21 @@ func parseField(v reflect.Value, r *bytes.Buffer, params fieldParameters) (offse
 		var v string
 		switch universalTag {
 		case asn1.TagPrintableString:
-			v, err = parsePrintableString(inner, t.length)
+			v, err = parsePrintableString(r, t.length)
 		case asn1.TagIA5String:
-			v, err = parseIA5String(inner, t.length)
+			v, err = parseIA5String(r, t.length)
 		case asn1.TagT61String:
-			v, err = parseT61String(inner, t.length)
+			v, err = parseT61String(r, t.length)
 		case asn1.TagUTF8String:
-			v, err = parseUTF8String(inner, t.length)
+			v, err = parseUTF8String(r, t.length)
 		case asn1.TagGeneralString:
 			// GeneralString is specified in ISO-2022/ECMA-35,
 			// A brief review suggests that it includes structures
 			// that allow the encoding to change midstring and
 			// such. We give up and pass it as an 8-bit string.
-			v, err = parseT61String(inner, t.length)
+			v, err = parseT61String(r, t.length)
 		default:
+			r.Next(t.length)
 			err = asn1.SyntaxError{fmt.Sprintf("internal error: unknown string type %d", universalTag)}
 		}
 		if err == nil {
