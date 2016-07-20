@@ -7,9 +7,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/subtle"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -228,6 +228,7 @@ func (p7 *PKCS7) Verify() (err error) {
 }
 
 func verifySignature(p7 *PKCS7, signer signerInfo) error {
+	content := p7.Content
 	if len(signer.AuthenticatedAttributes) > 0 {
 		// TODO(fullsailor): First check the content type match
 		var digest []byte
@@ -235,32 +236,37 @@ func verifySignature(p7 *PKCS7, signer signerInfo) error {
 		if err != nil {
 			return err
 		}
-		hash, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
+		hashType, err := getHashForOID(signer.DigestAlgorithm.Algorithm)
 		if err != nil {
 			return err
 		}
-		h := hash.New()
+		h := hashType.New()
 		h.Write(p7.Content)
 		computed := h.Sum(nil)
-		if !hmac.Equal(digest, computed) {
+		if subtle.ConstantTimeCompare(digest, computed) == 0 {
 			return &MessageDigestMismatchError{
 				ExpectedDigest: digest,
 				ActualDigest:   computed,
 			}
+		}
+
+		// TODO(fullsailor): Optionally verify certificate chain
+		// TODO(fullsailor): Optionally verify signingTime against certificate NotAfter/NotBefore
+		content, err = marshalAttributes(signer.AuthenticatedAttributes)
+		if err != nil {
+			return err
 		}
 	}
 	cert := getCertFromCertsByIssuerAndSerial(p7.Certificates, signer.IssuerAndSerialNumber)
 	if cert == nil {
 		return errors.New("pkcs7: No certificate for signer")
 	}
-	// TODO(fullsailor): Optionally verify certificate chain
-	// TODO(fullsailor): Optionally verify signingTime against certificate NotAfter/NotBefore
-	encodedAttributes, err := marshalAttributes(signer.AuthenticatedAttributes)
-	if err != nil {
-		return err
+	//algo := x509.SHA1WithRSA
+	algo := cert.SignatureAlgorithm
+	if algo == x509.UnknownSignatureAlgorithm {
+		algo = x509.SHA1WithRSA
 	}
-	algo := x509.SHA1WithRSA
-	return cert.CheckSignature(algo, encodedAttributes, signer.EncryptedDigest)
+	return cert.CheckSignature(algo, content, signer.EncryptedDigest)
 }
 
 func marshalAttributes(attrs []attribute) ([]byte, error) {
