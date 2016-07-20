@@ -15,6 +15,8 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"math/big"
 	"sort"
 	"time"
@@ -261,11 +263,7 @@ func verifySignature(p7 *PKCS7, signer signerInfo) error {
 	if cert == nil {
 		return errors.New("pkcs7: No certificate for signer")
 	}
-	//algo := x509.SHA1WithRSA
-	algo := cert.SignatureAlgorithm
-	if algo == x509.UnknownSignatureAlgorithm {
-		algo = x509.SHA1WithRSA
-	}
+	algo := x509.SHA1WithRSA
 	return cert.CheckSignature(algo, content, signer.EncryptedDigest)
 }
 
@@ -786,4 +784,13 @@ func encryptKey(key []byte, recipient *x509.Certificate) ([]byte, error) {
 		return rsa.EncryptPKCS1v15(rand.Reader, pub, key)
 	}
 	return nil, ErrUnsupportedAlgorithm
+}
+
+func ReadFrom(r io.Reader) (p7 *PKCS7, err error) {
+	content, err := ioutil.ReadAll(r)
+	if err != nil {
+		return
+	}
+
+	return Parse(content)
 }
