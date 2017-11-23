@@ -184,7 +184,7 @@ func readObject(r io.Reader) (asn1Object, int, error) {
 			tag = tag*128 + ber[offset] - 0x80
 			offset++
 		}
-		tag = tag*128 + ber[offset] - 0x80
+		// tag = tag*128 + ber[offset] - 0x80
 		offset++
 	}
 	tagEnd := offset
