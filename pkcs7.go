@@ -158,7 +158,7 @@ func Parse(data []byte) (p7 *PKCS7, err error) {
 
 func parseSignedData(data []byte) (*PKCS7, error) {
 	var sd signedData
-	Unmarshal(data, &sd)
+	_, _ = Unmarshal(data, &sd)
 	certs, err := sd.Certificates.Parse()
 	if err != nil {
 		return nil, err
@@ -243,7 +243,7 @@ func verifySignature(p7 *PKCS7, signer signerInfo) error {
 			return err
 		}
 		h := hashType.New()
-		h.Write(p7.Content)
+		_, _ = h.Write(p7.Content)
 		computed := h.Sum(nil)
 		if subtle.ConstantTimeCompare(digest, computed) == 0 {
 			return &MessageDigestMismatchError{
@@ -277,7 +277,7 @@ func marshalAttributes(attrs []attribute) ([]byte, error) {
 
 	// Remove the leading sequence octets
 	var raw asn1.RawValue
-	Unmarshal(encodedAttributes, &raw)
+	_, _ = Unmarshal(encodedAttributes, &raw)
 	return raw.Bytes, nil
 }
 
@@ -504,7 +504,7 @@ func NewSignedData(data []byte) (*SignedData, error) {
 		Algorithm: oidDigestAlgorithmSHA1,
 	}
 	h := crypto.SHA1.New()
-	h.Write(data)
+	_, _ = h.Write(data)
 	md := h.Sum(nil)
 	sd := signedData{
 		ContentInfo:                ci,
@@ -651,7 +651,7 @@ func signAttributes(attrs []attribute, pkey crypto.PrivateKey, hash crypto.Hash)
 		return nil, err
 	}
 	h := hash.New()
-	h.Write(attrBytes)
+	_, _ = h.Write(attrBytes)
 	hashed := h.Sum(nil)
 	switch priv := pkey.(type) {
 	case *rsa.PrivateKey:
@@ -786,6 +786,7 @@ func encryptKey(key []byte, recipient *x509.Certificate) ([]byte, error) {
 	return nil, ErrUnsupportedAlgorithm
 }
 
+// ReadFrom reads data from reader
 func ReadFrom(r io.Reader) (p7 *PKCS7, err error) {
 	content, err := ioutil.ReadAll(r)
 	if err != nil {

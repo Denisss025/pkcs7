@@ -273,13 +273,13 @@ func UnmarshalTestFixture(testPEMBlock string) TestFixture {
 
 func MarshalTestFixture(t TestFixture, w io.Writer) {
 	if t.Input != nil {
-		pem.Encode(w, &pem.Block{Type: "PKCS7", Bytes: t.Input})
+		_ = pem.Encode(w, &pem.Block{Type: "PKCS7", Bytes: t.Input})
 	}
 	if t.Certificate != nil {
-		pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: t.Certificate.Raw})
+		_ = pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: t.Certificate.Raw})
 	}
 	if t.PrivateKey != nil {
-		pem.Encode(w, &pem.Block{Type: "PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(t.PrivateKey)})
+		_ = pem.Encode(w, &pem.Block{Type: "PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(t.PrivateKey)})
 	}
 }
 

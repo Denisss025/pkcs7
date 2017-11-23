@@ -16,15 +16,24 @@ var (
 		return new(errHandlerWriter)
 	}}
 
-	ErrBerIsEmpty           = errors.New("ber2der: input ber is empty")
-	ErrTagLenTooLong        = errors.New("ber2der: BER tag length too long")
-	ErrTagLenNegative       = errors.New("ber2der: BER tag length is negative")
+	// ErrBerIsEmpty is returned when BER structure is empty
+	ErrBerIsEmpty = errors.New("ber2der: input ber is empty")
+	// ErrTagLenTooLong is returned when BER tag length is too long
+	ErrTagLenTooLong = errors.New("ber2der: BER tag length too long")
+	// ErrTagLenNegative is returned when a BER tag has negative length
+	ErrTagLenNegative = errors.New("ber2der: BER tag length is negative")
+	// ErrTagLenHasLeadingZero is returned when a BER tag has a negative length
 	ErrTagLenHasLeadingZero = errors.New("ber2der: BER tag length has leading zero")
-	ErrTagLenOverflow       = errors.New("ber2der: BER tag length is more than available data")
-	ErrInvalidFormat        = errors.New("ber2der: Invalid BER format")
+	// ErrTagLenOverflow is returned when a BER tag has a length greater
+	// then the whole data length.
+	ErrTagLenOverflow = errors.New("ber2der: BER tag length is more than available data")
+	// ErrInvalidFormat is returned when the given data does not have
+	// correct BER format.
+	ErrInvalidFormat = errors.New("ber2der: Invalid BER format")
 )
 
 type asn1Object interface {
+	// EncodeTo encodes data to io.Writer
 	EncodeTo(io.Writer) error
 }
 
@@ -35,9 +44,11 @@ type asn1Structured struct {
 
 type errHandlerWriter struct {
 	io.Writer
+	// Err contains an error, which was returned by Write method.
 	Err error
 }
 
+// Write writes bytes p to the writer w.
 func (w *errHandlerWriter) Write(p []byte) (n int, err error) {
 	if err = w.Err; err != nil {
 		return
@@ -47,40 +58,42 @@ func (w *errHandlerWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-func AcquireErrorHandler(w io.Writer) *errHandlerWriter {
+// acquireErrorHandler returns a writer that handles errors.
+func acquireErrorHandler(w io.Writer) *errHandlerWriter {
 	ehw := ehwPool.Get().(*errHandlerWriter)
 	ehw.Writer = w
 	ehw.Err = nil
 	return ehw
 }
 
+// Release releases the resources used by errHandlerWriter.
 func (w *errHandlerWriter) Release() error {
 	err := w.Err
 	ehwPool.Put(w)
 	return err
 }
 
-func (s *asn1Structured) EncodeTo(out io.Writer) error {
+// EncodeTo encodes ASN1 structure to io.Writer.
+func (s *asn1Structured) EncodeTo(out io.Writer) (err error) {
 	inner := bufPool.Get().(*bytes.Buffer)
 	inner.Reset()
 	defer bufPool.Put(inner)
 
 	for _, obj := range s.content {
-		err := obj.EncodeTo(inner)
+		err = obj.EncodeTo(inner)
 		if err != nil {
-			return err
+			return
 		}
 	}
-	errorHandler := AcquireErrorHandler(out)
-	defer errorHandler.Release()
+	errorHandler := acquireErrorHandler(out)
+	defer func() { _ = errorHandler.Release() }()
 
-	errorHandler.Write(s.tagBytes)
-	if _, err := encodeLength(errorHandler, int64(inner.Len())); err != nil {
-		return err
+	_, _ = errorHandler.Write(s.tagBytes)
+	if _, err = encodeLength(errorHandler, int64(inner.Len())); err != nil {
+		return
 	}
-	errorHandler.Write(inner.Bytes())
-	err := errorHandler.Err
-	return err
+	_, err = errorHandler.Write(inner.Bytes())
+	return
 }
 
 type asn1Primitive struct {
@@ -88,25 +101,25 @@ type asn1Primitive struct {
 	content  []byte
 }
 
-func (p asn1Primitive) EncodeTo(out io.Writer) error {
-	errorHandler := AcquireErrorHandler(out)
-	defer errorHandler.Release()
-	errorHandler.Write(p.tagBytes)
-	if _, err := encodeLength(out, int64(len(p.content))); err != nil {
-		return err
+// EncodeTo encodes ASN1 primitive to io.Writer.
+func (p asn1Primitive) EncodeTo(out io.Writer) (err error) {
+	errorHandler := acquireErrorHandler(out)
+	defer func() { _ = errorHandler.Release() }()
+	_, _ = errorHandler.Write(p.tagBytes)
+	if _, err = encodeLength(out, int64(len(p.content))); err != nil {
+		return
 	}
-	errorHandler.Write(p.content)
-	err := errorHandler.Err
-	return err
+	_, err = errorHandler.Write(p.content)
+	return
 }
 
 func ber2der(dst io.Writer, ber io.Reader) error {
 	//fmt.Printf("--> ber2der: Transcoding %d bytes\n", len(ber))
-	if obj, _, err := readObject(ber); err != nil {
+	obj, _, err := readObject(ber)
+	if err != nil {
 		return err
-	} else {
-		return obj.EncodeTo(dst)
 	}
+	return obj.EncodeTo(dst)
 	// if offset < len(ber) {
 	//	return nil, fmt.Errorf("ber2der: Content longer than expected. Got %d, expected %d", offset, len(ber))
 	//}
@@ -161,7 +174,7 @@ func readObject(r io.Reader) (asn1Object, int, error) {
 	//fmt.Printf("\n====> Starting readObject at offset: %d\n\n", offset)
 	offset := 0
 	ber := make([]byte, buf.Len())
-	io.ReadFull(buf, ber)
+	_, _ = io.ReadFull(buf, ber)
 	b := ber[offset]
 	offset++
 	// Tag == last 5 bits
