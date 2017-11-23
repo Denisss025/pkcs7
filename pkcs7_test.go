@@ -140,7 +140,7 @@ func TestUnmarshalSignedAttribute(t *testing.T) {
 	oidTest := asn1.ObjectIdentifier{2, 3, 4, 5, 6, 7}
 	testValue := "TestValue"
 	if err := toBeSigned.AddSigner(cert.Certificate, cert.PrivateKey, SignerInfoConfig{
-		ExtraSignedAttributes: []Attribute{Attribute{Type: oidTest, Value: testValue}},
+		ExtraSignedAttributes: []Attribute{{Type: oidTest, Value: testValue}},
 	}); err != nil {
 		t.Fatalf("Cannot add signer: %s", err)
 	}
